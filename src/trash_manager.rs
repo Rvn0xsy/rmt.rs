@@ -26,7 +26,22 @@ pub fn add_element_to_trash(
     element_path: &str,
     arguments_manager: &ArgumentsManager,
 ) {
-    let element_size = get_size(element_path).expect("Unable to get element size");
+    let element_size = match get_size(element_path) {
+        Ok(size) => size,
+        Err(e) => {
+            let error_message = e.to_string();
+            if error_message.contains("No such file or directory")
+                || error_message.contains("not found")
+            {
+                if arguments_manager.is_verbose {
+                    eprintln!("Warning: Element {} not found, skipping", element_path);
+                }
+                return;
+            } else {
+                panic!("Unable to get element size: {}", e);
+            }
+        }
+    };
 
     let hash = sha256::digest(format!(
         "{}{}{}",
@@ -45,9 +60,11 @@ pub fn add_element_to_trash(
 
     if config.compression {
         let compressed_path = format!("{}.zip", element_path);
-        compress_element(element_path, &compressed_path).expect("Failed to compress");
-        compression_size =
-            Some(get_size(&compressed_path).expect("Unable to get compressed element size"));
+        if let Err(e) = compress_element(element_path, &compressed_path) {
+            let _ = fs::remove_file(&compressed_path);
+            panic!("Failed to compress: {}", e);
+        }
+        compression_size = Some(get_size(&compressed_path).unwrap_or(0));
         is_compressed = true;
 
         if config.encryption {
@@ -61,7 +78,7 @@ pub fn add_element_to_trash(
                 ),
             )
             .expect("Failed to encrypt");
-            fs::remove_file(&compressed_path).unwrap();
+            let _ = fs::remove_file(&compressed_path);
             is_encrypted = true;
         } else {
             let new_name = format!(
@@ -70,18 +87,20 @@ pub fn add_element_to_trash(
                 MAIN_SEPARATOR,
                 hash
             );
-            fs::rename(&compressed_path, &new_name).unwrap();
+            if let Err(e) = fs::rename(&compressed_path, &new_name) {
+                panic!("Failed to rename compressed file: {}", e);
+            }
             fs_extra::move_items(
                 &[&new_name],
                 get_trash_directory_path(arguments_manager.is_test),
                 &dir::CopyOptions::new(),
             )
-            .unwrap();
+            .expect("Failed to move compressed file to trash");
         }
         if !element_is_directory {
-            fs::remove_file(element_path).unwrap();
+            let _ = fs::remove_file(element_path);
         } else {
-            fs::remove_dir_all(element_path).unwrap();
+            let _ = fs::remove_dir_all(element_path);
         }
     } else if config.encryption && !element_is_directory {
         encrypt_element(
@@ -95,7 +114,7 @@ pub fn add_element_to_trash(
         )
         .expect("Failed to encrypt");
         is_encrypted = true;
-        fs::remove_file(element_path).unwrap();
+        let _ = fs::remove_file(element_path);
     } else {
         let new_name = format!(
             "{}{}{}",
@@ -103,13 +122,19 @@ pub fn add_element_to_trash(
             MAIN_SEPARATOR,
             hash
         );
-        fs::rename(element_path, &new_name).unwrap();
-        fs_extra::move_items(
+        if let Err(e) = fs::rename(element_path, &new_name) {
+            panic!("Failed to rename element: {}", e);
+        }
+        if let Err(e) = fs_extra::move_items(
             &[&new_name],
             get_trash_directory_path(arguments_manager.is_test),
             &dir::CopyOptions::new(),
-        )
-        .unwrap();
+        ) {
+            eprintln!(
+                "Warning: Failed to move element to trash: {}. Element will remain at {}",
+                e, new_name
+            );
+        }
     };
 
     let trash_item = TrashItem::new(
@@ -161,11 +186,20 @@ fn compress_element(source_path: &str, dist_path: &str) -> Result<(), std::io::E
             let entry_name = entry_path.strip_prefix(base_path).unwrap();
 
             if entry_path.is_file() {
+                if !entry_path.exists() {
+                    continue;
+                }
+                if let Ok(metadata) = entry_path.metadata() {
+                    if metadata.is_symlink() {
+                        continue;
+                    }
+                }
                 zip_wtr.start_file(entry_name.to_string_lossy(), zip_opts)?;
-                let mut f = File::open(entry_path)?;
-                f.read_to_end(&mut buffer)?;
-                zip_wtr.write_all(&buffer)?;
-                buffer.clear();
+                if let Ok(mut f) = File::open(entry_path) {
+                    f.read_to_end(&mut buffer)?;
+                    zip_wtr.write_all(&buffer)?;
+                    buffer.clear();
+                }
             } else if !entry_name.as_os_str().is_empty() {
                 zip_wtr.add_directory(entry_name.to_string_lossy(), zip_opts)?;
             }
