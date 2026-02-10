@@ -47,7 +47,9 @@ pub fn add_element_to_trash(
         "{}{}{}",
         &element_path,
         element_size,
-        chrono::offset::Local::now().timestamp_nanos()
+        chrono::offset::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
     ));
 
     let date = chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S");
